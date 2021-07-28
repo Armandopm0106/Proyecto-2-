@@ -1,0 +1,277 @@
+---
+title: "Visualización de datos de orquideas para la familia *Orchidaceae* en Costa Rica"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(raster)
+library(rmapshaper)
+library(dplyr)
+library(sf)
+library(DT)
+library(plotly)
+library(leafem)
+library(leaflet)
+library(leaflet.extras)
+library(sp)
+```
+
+```{r}
+Orquideas <- 
+  st_read(
+    "https://raw.githubusercontent.com/gf0604-procesamientodatosgeograficos/2021i-datos/main/gbif/orchidaceae-cr-registros.csv",
+    options = c(
+      "X_POSSIBLE_NAMES=decimalLongitude",
+      "Y_POSSIBLE_NAMES=decimalLatitude"
+    ),
+    quiet = TRUE
+  )
+st_crs(Orquideas) = 4326 #Transformación de proyección
+
+#Carga de datos de cantones y provincias
+cantones <-
+  st_read("https://raw.githubusercontent.com/gf0604-procesamientodatosgeograficos/2021i-datos/main/ign/delimitacion-territorial-administrativa/cr_cantones_simp_wgs84.geojson",
+          quiet = TRUE)
+provincias <-
+  st_read("https://raw.githubusercontent.com/gf0604-procesamientodatosgeograficos/2021i-datos/main/ign/delimitacion-territorial-administrativa/cr_provincias_simp_wgs84.geojson",
+          quiet = TRUE)
+
+st_crs(provincias) = 4326
+st_crs(cantones) = 4326
+
+#Cruce de datos
+Orquideas <- 
+  Orquideas %>%
+  st_join(cantones["canton"]) %>%
+  st_join(provincias["provincia"])
+
+#Tranformación de NA's a 0, datos de incertidumbre a numericos, datos de caracter a fechas y limpieza de datos un incertidumbre mayor a mil
+
+Orquideas$coordinateUncertaintyInMeters[Orquideas$coordinateUncertaintyInMeters == ""] <- "0"
+
+Orquideas <-
+  Orquideas %>%
+  mutate(coordinateUncertaintyInMeters = as.numeric(coordinateUncertaintyInMeters)) %>%
+  mutate(eventDate = as.Date(eventDate, "%Y-%m-%d")) %>%
+  filter(!is.na(coordinateUncertaintyInMeters) & coordinateUncertaintyInMeters <= 1000)
+```
+
+Registros de presencia
+=======================================================================
+
+column {data-width=70}
+-----------------------------------------------------------------------
+
+### Cantidad de registros
+```{r}
+valueBox(value = nrow(Orquideas), 
+         caption = "Registros de presencia", 
+         icon = "fas fa-spa",
+         color = "#007b00"
+)
+```
+
+### Total de generos
+```{r}
+Gorquideas <- Orquideas %>%
+  filter(!is.na(genus) & genus != "") %>%
+  group_by(genus) %>% 
+  summarise(registros = n())
+valueBox(value = nrow(Gorquideas), 
+         icon = "fas fa-spa", 
+         color = "#258d19")
+```
+
+### Total de especies
+```{r}
+EOrquideas <- Orquideas %>%
+  filter(!is.na(species) & species != "") %>%
+  group_by(species) %>% 
+  summarise(registros = n())
+valueBox(value = nrow(EOrquideas), 
+         icon = "fas fa-spa", 
+         color = "#005200")
+```
+
+row {data-height=400}
+-----------------------------------------------------------------------
+
+### Tabla de registros de presencia
+
+```{r}
+Orquideas %>%
+  st_drop_geometry() %>%
+  select(species,
+         eventDate,
+         canton,
+         stateProvince
+         ) %>%
+  DT::datatable(
+    colnames = c("Especies", "Fecha", "Cantón", "Provincia"),
+    rownames = FALSE,
+    options = list(searchHighlight = TRUE,
+                   language = list(url = "//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json"),
+                   pageLength = 14
+    )
+  )
+```
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Grafico de pastel
+
+```{r}
+MOrquideas <-
+  Orquideas %>%
+  st_drop_geometry() %>%
+  filter(!is.na(species) & species != "") %>%
+  group_by(species) %>%
+  summarise(registros = n()) %>%
+  arrange(desc(registros)) %>%
+  slice(1:10)
+# Una vez echo esto se sumaron totas las variables de los diez slices y se restaron a al cantidad total
+# Esto dando como resultados la cantidad de otros y colocandolo manualmente en un archivo .csv utilizando libreoffice calc
+DatosMOrquideas <- read.csv("Dorquideas.csv", sep = ",", na.strings = "", dec = ",")
+data <- DatosMOrquideas[,c("Especie", "Ejemplares")]
+fig <- plot_ly(data, labels = ~Especie, values = ~Ejemplares, type = "pie")
+fig <- fig %>%
+  config(locale = "es") %>%
+  layout(title = "Cantidad de registros por especie de orquideas en Costa Rica",
+         xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+         yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+fig
+```
+
+
+### Mapa clustered
+
+```{r}
+Orquideas_especies <-
+  provincias %>%
+  st_join(Orquideas) %>%
+  group_by(provincia.x) %>%
+  summarize(especies = n())
+
+
+st_crs(Orquideas_especies) = 4326
+
+#Creación de paleta de colores 
+Colores_especies <- 
+  colorNumeric(palette = "PuRd",
+               domain = Orquideas_especies$especies,
+               na.color = "transparent")
+#Creacion de mapa clustered
+leaflet() %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik, group = "OpenStreetMap") %>%
+  addProviderTiles(providers$CartoDB.DarkMatter, group = "CartoDB.DarkMatter") %>%
+  addPolygons(
+    data = Orquideas_especies,
+    fillColor = ~Colores_especies(Orquideas_especies$especies),
+    stroke = TRUE,
+    color = "white",
+    fillOpacity = 0.8,
+    weight = 1,
+    group = "Registros por provincias"
+  ) %>%
+addCircleMarkers(
+  data = Orquideas,
+  stroke = F,
+  radius = 2,
+  fillColor = "#f44611",
+  fillOpacity = 1,
+  popup = paste(
+    Orquideas$species,
+    Orquideas$canton,
+    Orquideas$stateProvince,
+    Orquideas$eventDate,
+    sep = '<br/>'
+  ),
+  clusterOptions = markerClusterOptions(),
+  group = "Registros de orquideas"
+  ) %>%
+  addLayersControl(baseGroups = c("OpenStreetMap", "CartoDB.DarkMatter"),
+                   overlayGroups = c("Registros por provincias", "Registros de orquideas")
+) %>%  
+addMiniMap() %>%
+  addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE))
+```
+
+
+Mapa raster de la cantidad de especies en cada celda
+================================================================================
+
+```{r}
+##Creación de mapa raster sobre la cantidad de especies por cerlda
+#Generación de capa de altitud
+alt <-
+  getData(
+    "worldclim",
+    var = "alt",
+    res = .5,
+    lon = -84,
+    lat = 10
+  )
+#Asignacion de proyección
+alt <-
+  alt %>%
+  projectRaster(crs = 4326)
+#Recorte de la altitud con base en la mascara de provincias
+altitud <-
+  alt %>%
+  crop(provincias) %>%
+  mask(provincias)
+#Agrupación de celdas
+Aalt <-
+  altitud %>%
+  aggregate(fact = 30)
+#Ras
+ROR <- 
+  rasterize(Orquideas,
+            Aalt,
+            field = 1,
+            fun = "count")
+#Generacion paleta colores
+rcolor <- 
+  colorNumeric(c("#FF8C00","#FF7F00","#EE7600","#CD6600","#8B4500"),
+               values(ROR),
+               na.color = "transparent"
+               )
+
+#Mapa raster de presencia por casilla
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.DarkMatter, group = "CartoDB.DarkMatter") %>%
+  addProviderTiles(providers$OpenStreetMap.Mapnik, group = "OpenStreetMap") %>%
+  addPolygons(
+    data = provincias,
+    fillColor = FALSE,
+    fillOpacity = 0,
+    color = "black",
+    weight = 1,
+    group = "Limites nacionales"
+  ) %>%
+  addRasterImage(
+    ROR,
+    colors = rcolor,
+    opacity = 1,
+    group = "Orquideas por celda"
+    ) %>%
+  addLayersControl(
+    baseGroups = c("OpenStreetMap", "CartoDB.DarkMatter"),
+    overlayGroups = c("Limites nacionales", "Orquideas por celdas")
+  ) %>%
+  addMiniMap() %>%
+  addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)) %>%
+  addLegend(
+    pal = rcolor,
+    values = values(ROR),
+    position = "bottomleft",
+    group = "Registros",
+    title = "Cantidad de registros por celdas"
+  )
+```
+
